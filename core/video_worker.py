@@ -1,172 +1,171 @@
 """
 视频处理工作线程
+整合解帧 -> 超分 -> 编码 完整流程
 """
-from PyQt6.QtCore import QThread, pyqtSignal
-import cv2
 import os
 import tempfile
 import shutil
+import logging
+from pathlib import Path
+from typing import Optional, Callable
+from PyQt6.QtCore import QThread, pyqtSignal
 
-from .upscaler import RealESRGANUpscaler, TileProcessor
-from .interpolator import RIFEInterpolator
+from .video_engine import VideoEngine
+from .upscaler import UpscalerEngine
+
+logger = logging.getLogger(__name__)
 
 
 class VideoWorker(QThread):
     """视频处理工作线程"""
     
-    progress = pyqtSignal(int)  # 进度 0-100
-    frame_ready = pyqtSignal(object)  # 帧数据，用于预览
-    finished = pyqtSignal(bool)  # 是否成功
-    error = pyqtSignal(str)  # 错误信息
+    # 信号定义
+    progress = pyqtSignal(int, int)  # current, total
+    status = pyqtSignal(str)  # 状态文本
+    frame_progress = pyqtSignal(int, int)  # frame_current, frame_total
+    finished = pyqtSignal(bool, str)  # success, message
     
-    def __init__(self, input_path: str, output_path: str = None, preset: str = "standard"):
-        super().__init__()
+    def __init__(
+        self,
+        input_path: str,
+        output_path: str,
+        preset: str = "标准",
+        enable_interpolate: bool = False,
+        ffmpeg_path: str = "ffmpeg",
+        model_dir: str = None,
+        parent=None
+    ):
+        super().__init__(parent)
+        
         self.input_path = input_path
-        self.preset = preset
-        self.is_running = True
-        
-        # 输出路径
-        if output_path is None:
-            base, ext = os.path.splitext(input_path)
-            suffix = "_upscaled"
-            output_path = f"{base}{suffix}{ext}"
         self.output_path = output_path
+        self.preset = preset
+        self.enable_interpolate = enable_interpolate
+        self.ffmpeg_path = ffmpeg_path
+        self.model_dir = model_dir
         
-        # 初始化处理器
+        self._is_running = True
+        self._temp_dir = None
+        self.video_engine = None
         self.upscaler = None
-        self.interpolator = None
     
     def stop(self):
         """停止处理"""
-        self.is_running = False
+        self._is_running = False
+        self.status.emit("正在停止...")
+    
+    def is_running(self) -> bool:
+        return self._is_running
     
     def run(self):
         """主处理流程"""
         try:
-            self.process_video()
-            self.finished.emit(True)
+            self._process()
         except Exception as e:
-            self.error.emit(str(e))
-            self.finished.emit(False)
+            logger.exception("Processing failed")
+            self.finished.emit(False, str(e))
+        finally:
+            self._cleanup()
     
-    def process_video(self):
-        """处理视频"""
-        # 1. 分析视频
-        cap = cv2.VideoCapture(self.input_path)
-        if not cap.isOpened():
-            raise Exception(f"无法打开视频: {self.input_path}")
+    def _process(self):
+        """处理流程"""
+        # 1. 初始化引擎
+        self.status.emit("初始化...")
+        self.video_engine = VideoEngine(self.ffmpeg_path)
         
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # 获取视频信息
+        self.status.emit("分析视频...")
+        video_info = self.video_engine.get_video_info(self.input_path)
+        logger.info(f"Video info: {video_info}")
         
-        print(f"[Worker] 输入: {width}x{height}@{fps}fps, 共{total_frames}帧")
+        # 2. 创建临时目录
+        self._temp_dir = tempfile.mkdtemp(prefix="upscaler_")
+        logger.info(f"Temp dir: {self._temp_dir}")
         
-        # 2. 根据预设确定输出参数
-        output_fps, scale, enable_interpolation = self.get_preset_params(fps)
+        # 3. 解帧
+        if not self._is_running:
+            return
         
-        # 3. 创建临时目录
-        with tempfile.TemporaryDirectory() as tmpdir:
-            frames_dir = os.path.join(tmpdir, "frames")
-            os.makedirs(frames_dir, exist_ok=True)
-            
-            # 4. 初始化模型
-            self.upscaler = RealESRGANUpscaler(scale=scale)
-            tile_processor = TileProcessor(self.upscaler)
-            
-            if enable_interpolation:
-                self.interpolator = RIFEInterpolator()
-            
-            # 5. 处理每一帧
-            processed = 0
-            frame_idx = 0
-            
-            while self.is_running:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                
-                # 超分
-                upscaled = tile_processor.process_frame(frame)
-                
-                # 保存帧
-                frame_path = os.path.join(frames_dir, f"frame_{frame_idx:08d}.png")
-                cv2.imwrite(frame_path, upscaled)
-                
-                # 更新进度
-                processed += 1
-                progress = int(processed / total_frames * 50)  # 超分占50%
-                self.progress.emit(progress)
-                
-                # 发射预览帧（每30帧显示一次）
-                if frame_idx % 30 == 0:
-                    self.frame_ready.emit(upscaled)
-                
-                frame_idx += 1
-            
-            cap.release()
-            
-            if not self.is_running:
-                print("[Worker] 用户取消")
-                return
-            
-            # 6. 补帧（如果启用）
-            if enable_interpolation and self.interpolator:
-                self.interpolator.interpolate_frames(frames_dir, output_fps / fps)
-                self.progress.emit(75)  # 补帧占25%
-            
-            # 7. 编码输出
-            self.encode_video(frames_dir, output_fps)
-            self.progress.emit(100)
-            
-            print(f"[Worker] 输出完成: {self.output_path}")
+        self.status.emit("提取视频帧...")
+        frame_count, fps, frames_dir = self.video_engine.extract_frames(
+            self.input_path,
+            self._temp_dir
+        )
+        logger.info(f"Extracted {frame_count} frames at {fps}fps")
+        
+        # 4. 超分
+        if not self._is_running:
+            return
+        
+        self.status.emit("超分辨率处理...")
+        upscaled_dir = os.path.join(self._temp_dir, "upscaled")
+        
+        self.upscaler = UpscalerEngine(
+            preset=self.preset,
+            device="cuda",
+            use_fp16=True
+        )
+        
+        success, total = self.upscaler.upscale_batch(
+            frames_dir,
+            upscaled_dir,
+            progress_callback=self._on_frame_progress
+        )
+        
+        logger.info(f"Upscaled {success}/{total} frames")
+        
+        if success < total:
+            self.status.emit(f"警告: {total - success} 帧处理失败")
+        
+        # 5. 补帧（可选）
+        if self.enable_interpolate and self._is_running:
+            self.status.emit("补帧处理...")
+            # TODO: RIFE 补帧实现
+            pass
+        
+        # 6. 编码输出
+        if not self._is_running:
+            return
+        
+        self.status.emit("编码视频...")
+        
+        # 选择编码器
+        output_suffix = Path(self.output_path).suffix.lower()
+        if output_suffix in ['.hevc', '.mkv']:
+            codec = "hevc_nvenc"
+        else:
+            codec = "h264_nvenc"
+        
+        self.video_engine.encode_video(
+            upscaled_dir,
+            self.output_path,
+            fps,
+            audio_source=self.input_path,
+            codec=codec,
+            crf=18
+        )
+        
+        logger.info(f"Output saved: {self.output_path}")
+        self.status.emit("完成!")
+        self.finished.emit(True, f"成功处理 {success} 帧")
     
-    def get_preset_params(self, input_fps: float) -> tuple:
-        """
-        根据预设获取参数
-        
-        Returns:
-            (output_fps, scale, enable_interpolation)
-        """
-        presets = {
-            "fast": (input_fps, 2, False),      # 流畅档：2x超分，不补帧
-            "standard": (60, 2, True),          # 标准档：2x超分+60fps
-            "high": (60, 4, True),              # 高清档：4x超分+60fps
-        }
-        return presets.get(self.preset, presets["standard"])
+    def _on_frame_progress(self, current: int, total: int):
+        """帧处理进度回调"""
+        self.frame_progress.emit(current, total)
+        # 计算总进度: 解帧10% + 超分70% + 编码20%
+        progress = 10 + int(current / total * 70)
+        self.progress.emit(progress, 100)
     
-    def encode_video(self, frames_dir: str, fps: float):
-        """编码视频"""
-        # 获取帧尺寸
-        frames = sorted([f for f in os.listdir(frames_dir) if f.endswith('.png')])
-        if not frames:
-            raise Exception("没有可编码的帧")
+    def _cleanup(self):
+        """清理临时文件"""
+        if self._temp_dir and os.path.exists(self._temp_dir):
+            try:
+                shutil.rmtree(self._temp_dir, ignore_errors=True)
+                logger.info(f"Cleaned up {self._temp_dir}")
+            except Exception as e:
+                logger.warning(f"Cleanup failed: {e}")
         
-        sample = cv2.imread(os.path.join(frames_dir, frames[0]))
-        h, w = sample.shape[:2]
-        
-        # FFmpeg 编码
-        import subprocess
-        
-        input_pattern = os.path.join(frames_dir, "frame_%08d.png")
-        
-        # 使用 NVENC 硬件编码
-        cmd = [
-            'ffmpeg', '-y',
-            '-framerate', str(fps),
-            '-i', input_pattern,
-            '-c:v', 'h264_nvenc',
-            '-preset', 'p4',  # 质量优先
-            '-cq', '23',      # 质量设置
-            '-pix_fmt', 'yuv420p',
-            '-movflags', '+faststart',
-            self.output_path
-        ]
-        
-        print(f"[Worker] 编码命令: {' '.join(cmd)}")
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"[Worker] 编码错误: {result.stderr}")
-            raise Exception(f"FFmpeg编码失败: {result.stderr[:500]}")
+        # 释放显存
+        if self.upscaler:
+            del self.upscaler
+            self.upscaler = None

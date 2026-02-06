@@ -1,123 +1,126 @@
 """
-补帧模块 - RIFE 封装
+补帧引擎
+基于 RIFE - 视频帧率提升
 """
-import torch
-import numpy as np
-import cv2
 import os
-from typing import List, Tuple
+import logging
+from typing import Optional, Callable, Tuple
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
-class RIFEInterpolator:
-    """RIFE 补帧器"""
+class InterpolatorEngine:
+    """补帧引擎"""
     
-    def __init__(self, model_path: str = None):
-        self.model = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"[Interpolator] 使用设备: {self.device}")
-        
-        if model_path is None:
-            model_dir = os.path.join(os.path.dirname(__file__), '..', 'models')
-            model_path = os.path.join(model_dir, 'rife.pth')
-        
-        self.load_model(model_path)
+    # 目标帧率映射
+    TARGET_FPS = {
+        24: 60,  # 电影 → 60fps
+        25: 60,  # PAL → 60fps  
+        30: 60,  # NTSC → 60fps
+    }
     
-    def load_model(self, model_path: str):
-        """加载模型"""
-        try:
-            # 简化的RIFE实现（占位符）
-            # 实际使用时需要安装 flownet2 或 RIFE 官方实现
-            print(f"[Interpolator] RIFE模型加载（占位符）: {model_path}")
-            self.model = None
-            
-        except Exception as e:
-            print(f"[Interpolator] 模型加载失败: {e}")
-            self.model = None
-    
-    def interpolate_frames(self, frames_dir: str, ratio: float = 2.5):
+    def __init__(
+        self,
+        model_path: str = None,
+        device: str = "cuda",
+        use_fp16: bool = True
+    ):
         """
-        对帧序列进行补帧
+        Args:
+            model_path: RIFE 模型路径
+            device: cuda/cpu
+            use_fp16: 使用半精度
+        """
+        self.model_path = model_path
+        self.device = device
+        self.use_fp16 = use_fp16
+        self.model = None
+        
+        self.target_fps = 60
+        self._load_model()
+    
+    def _load_model(self):
+        """加载 RIFE 模型"""
+        try:
+            # TODO: 实现 RIFE 模型加载
+            # 目前先占位，后续集成 practical-rife 或 VFIm
+            logger.info("Interpolator model loading (placeholder)")
+            self.model = None  # Placeholder
+            
+        except ImportError as e:
+            logger.warning(f"RIFE not available: {e}")
+            self.model = None
+    
+    def is_available(self) -> bool:
+        """检查补帧是否可用"""
+        return self.model is not None
+    
+    def interpolate_frames(
+        self,
+        input_dir: str,
+        output_dir: str,
+        source_fps: float,
+        progress_callback: Optional[Callable[[int, int], None]] = None
+    ) -> Tuple[int, float]:
+        """
+        补帧处理
         
         Args:
-            frames_dir: 帧目录
-            ratio: 插值倍率（2.5表示 24fps -> 60fps）
+            input_dir: 输入帧目录
+            output_dir: 输出帧目录  
+            source_fps: 原始帧率
+            progress_callback: 进度回调 (current, total)
+        
+        Returns:
+            (输出帧数, 目标帧率)
         """
-        # 获取所有帧
-        frames = sorted([f for f in os.listdir(frames_dir) if f.endswith('.png')])
-        if len(frames) < 2:
-            return
+        if not self.is_available():
+            logger.error("Interpolator not available")
+            return 0, source_fps
         
-        # 计算需要插入的帧数
-        if ratio <= 1:
-            return
+        target_fps = self.TARGET_FPS.get(int(source_fps), 60)
         
-        n_interpolations = int(ratio) - 1
+        # 计算需要生成的帧
+        ratio = target_fps / source_fps
         
-        print(f"[Interpolator] 补帧: {len(frames)}帧 -> {len(frames) * int(ratio)}帧")
+        logger.info(f"Interpolating {source_fps}fps → {target_fps}fps (ratio={ratio:.2f})")
         
-        # 实际实现需要使用RIFE模型
-        # 这里提供伪代码框架
-        """
-        for i in range(len(frames) - 1):
-            frame1 = cv2.imread(os.path.join(frames_dir, frames[i]))
-            frame2 = cv2.imread(os.path.join(frames_dir, frames[i + 1]))
+        # TODO: 实现 RIFE 推理流程
+        # 1. 读取连续两帧
+        # 2. 模型推理生成中间帧
+        # 3. 保存插值结果
+        
+        # 占位实现：直接复制输入帧
+        import shutil
+        from pathlib import Path
+        
+        os.makedirs(output_dir, exist_ok=True)
+        input_frames = sorted(Path(input_dir).glob("*.png"))
+        
+        # 简单复制（实际应该插值）
+        for i, frame in enumerate(input_frames):
+            # 复制原帧
+            shutil.copy(frame, os.path.join(output_dir, f"frame_{i*2:08d}.png"))
+            # 占位复制（模拟插值帧）
+            shutil.copy(frame, os.path.join(output_dir, f"frame_{i*2+1:08d}.png"))
             
-            # 转换为张量
-            img0 = self.frame_to_tensor(frame1)
-            img1 = self.frame_to_tensor(frame2)
-            
-            # 生成中间帧
-            for j in range(n_interpolations):
-                timestep = (j + 1) / (n_interpolations + 1)
-                middle = self.model.inference(img0, img1, timestep)
-                
-                # 保存中间帧
-                output_path = os.path.join(frames_dir, f"interp_{i}_{j}.png")
-                cv2.imwrite(output_path, self.tensor_to_frame(middle))
+            if progress_callback:
+                progress_callback(i + 1, len(input_frames))
         
-        # 重新排序所有帧
-        self.reorder_frames(frames_dir)
-        """
-        
-        # 占位符：简单复制帧（实际项目替换为RIFE）
-        print("[Interpolator] 使用占位实现（实际用RIFE模型）")
-        for frame in frames:
-            src = os.path.join(frames_dir, frame)
-            # 简单复制模拟补帧效果
-            for j in range(int(ratio) - 1):
-                dst = os.path.join(frames_dir, f"dup_{frame}_{j}.png")
-                shutil.copy(src, dst)
+        return len(input_frames) * 2, target_fps
     
-    def frame_to_tensor(self, frame: np.ndarray) -> torch.Tensor:
-        """帧转张量"""
-        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).float() / 255.0
-        return img.to(self.device)
-    
-    def tensor_to_frame(self, tensor: torch.Tensor) -> np.ndarray:
-        """张量转帧"""
-        img = tensor.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255
-        img = np.clip(img, 0, 255).astype(np.uint8)
-        return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    
-    def reorder_frames(self, frames_dir: str):
-        """重新排序帧文件"""
-        # 按时间戳重命名所有帧
-        frames = sorted([f for f in os.listdir(frames_dir) if f.endswith('.png')])
+    def _find_model(self) -> Optional[str]:
+        """查找 RIFE 模型"""
+        # 常见位置
+        search_paths = [
+            "models/rife/",
+            "~/.local/share/video-upscaler/models/rife/",
+        ]
         
-        # 临时重命名
-        for i, frame in enumerate(frames):
-            old = os.path.join(frames_dir, frame)
-            new = os.path.join(frames_dir, f"temp_{i:08d}.png")
-            os.rename(old, new)
+        for path in search_paths:
+            path = os.path.expanduser(path)
+            if os.path.exists(path):
+                return path
         
-        # 最终命名
-        temps = sorted([f for f in os.listdir(frames_dir) if f.startswith('temp_')])
-        for i, temp in enumerate(temps):
-            old = os.path.join(frames_dir, temp)
-            new = os.path.join(frames_dir, f"frame_{i:08d}.png")
-            os.rename(old, new)
-
-
-# 占位：需要shutil
-import shutil
+        return None
