@@ -1,177 +1,231 @@
 """
-超分核心 - Real-ESRGAN 封装
+超分核心引擎
+基于 Real-ESRGAN + Tile 分块处理
 """
-import numpy as np
-import cv2
-import torch
-from typing import Union, Tuple
 import os
+import gc
+import logging
+from pathlib import Path
+from typing import Optional, Callable, Tuple
+import numpy as np
+from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 
-class RealESRGANUpscaler:
-    """Real-ESRGAN 超分器"""
+class UpscalerEngine:
+    """超分引擎"""
     
-    def __init__(self, model_path: str = None, scale: int = 2):
-        self.scale = scale
+    # 预设配置：scale, tile_size, tile_pad
+    PRESETS = {
+        "流畅": {"scale": 2, "tile": 512, "pad": 10},   # 720p/1080p
+        "标准": {"scale": 4, "tile": 512, "pad": 10},   # 1080p60
+        "高清": {"scale": 4, "tile": 256, "pad": 10}    # 4K60 (256是平衡选择)
+    }
+    
+    def __init__(
+        self,
+        model_path: str = None,
+        model_name: str = "RealESRGAN_x4plus",
+        preset: str = "标准",
+        device: str = "cuda",
+        use_fp16: bool = True
+    ):
+        """
+        Args:
+            model_path: 模型文件路径
+            model_name: 模型名称
+            preset: 预设档位（流畅/标准/高清）
+            device: cuda/cpu
+            use_fp16: 使用半精度
+        """
+        self.model_path = model_path
+        self.model_name = model_name
+        self.preset = preset
+        self.device = device
+        self.use_fp16 = use_fp16
+        
+        self.config = self.PRESETS.get(preset, self.PRESETS["标准"])
+        self.tile_size = self.config["tile"]
+        self.tile_pad = self.config["pad"]
+        self.scale = self.config["scale"]
+        
         self.model = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"[Upscaler] 使用设备: {self.device}")
-        
-        # 默认模型路径
-        if model_path is None:
-            model_dir = os.path.join(os.path.dirname(__file__), '..', 'models')
-            model_name = f'RealESRGAN_x{scale}plus.pth'
-            model_path = os.path.join(model_dir, model_name)
-        
-        self.load_model(model_path)
+        self._load_model()
     
-    def load_model(self, model_path: str):
+    def _load_model(self):
         """加载模型"""
         try:
+            import torch
             from realesrgan import RealESRGANer
-            from basicsr.archs.rrdbnet_arch import RRDBNet
             
-            # 模型配置
-            model = RRDBNet(
-                num_in_ch=3, num_out_ch=3,
-                num_feat=64, num_block=23, num_grow_ch=32, scale=self.scale
-            )
+            # 确定模型路径
+            if self.model_path and os.path.exists(self.model_path):
+                model_path = self.model_path
+            else:
+                # 使用默认模型搜索
+                model_path = self._find_model()
             
-            self.upsampler = RealESRGANer(
+            # 初始化 Real-ESRGAN
+            self.model = RealESRGANer(
                 scale=self.scale,
                 model_path=model_path,
-                model=model,
-                tile=0,  # 不切片，显存够的情况
-                tile_pad=10,
+                model=self.model_name,
+                tile=self.tile_size,
+                tile_pad=self.tile_pad,
                 pre_pad=0,
-                half=True,  # FP16
+                half=self.use_fp16,
                 device=self.device
             )
             
-            print(f"[Upscaler] 模型加载成功: {model_path}")
-            
+        except ImportError:
+            raise RuntimeError("realesrgan not installed. Run: pip install realesrgan")
         except Exception as e:
-            print(f"[Upscaler] 模型加载失败: {e}")
-            self.upsampler = None
+            raise RuntimeError(f"Failed to load model: {e}")
     
-    def upscale(self, img: np.ndarray) -> np.ndarray:
+    def _find_model(self) -> str:
+        """查找模型文件"""
+        # 常见位置
+        search_paths = [
+            "models/",
+            "~/.local/share/video-upscaler/models/",
+            "/usr/local/share/video-upscaler/models/",
+        ]
+        
+        model_files = {
+            "RealESRGAN_x4plus": "RealESRGAN_x4plus.pth",
+            "RealESRGAN_x2plus": "RealESRGAN_x2plus.pth",
+            "RealESRGAN_anime_6B": "RealESRGAN_animevideov3.pth",
+        }
+        
+        model_file = model_files.get(self.model_name, "RealESRGAN_x4plus.pth")
+        
+        for path in search_paths:
+            path = os.path.expanduser(path)
+            full_path = os.path.join(path, model_file)
+            if os.path.exists(full_path):
+                return full_path
+        
+        raise FileNotFoundError(
+            f"Model {model_file} not found. "
+            f"Run: python scripts/download_models.py"
+        )
+    
+    def upscale_image(
+        self,
+        image_path: str,
+        output_path: str,
+        progress_callback: Optional[Callable[[int], None]] = None
+    ) -> str:
         """
-        超分单帧
+        超分单张图片
         
         Args:
-            img: BGR格式图像
-            
+            image_path: 输入图片路径
+            output_path: 输出图片路径
+            progress_callback: 进度回调 (0-100)
+        
         Returns:
-            超分后的图像
+            输出文件路径
         """
-        if self.upsampler is None:
-            print("[Upscaler] 模型未加载，返回原图")
-            return img
+        import cv2
         
-        try:
-            output, _ = self.upsampler.enhance(img, outscale=self.scale)
-            return output
-        except Exception as e:
-            print(f"[Upscaler] 超分失败: {e}")
-            return img
-    
-    def set_tile_size(self, tile_size: int):
-        """
-        设置切片大小（显存优化）
-        
-        RTX 4050 6GB 建议:
-        - 720p -> tile=256
-        - 1080p -> tile=128
-        - 4K -> tile=64
-        """
-        if self.upsampler:
-            self.upsampler.tile = tile_size
-            print(f"[Upscaler] 切片大小设置为: {tile_size}")
-
-
-class TileProcessor:
-    """Tile 分块处理器 - 显存优化核心"""
-    
-    def __init__(self, upscaler: RealESRGANUpscaler):
-        self.upscaler = upscaler
-        self.tile_size = 256
-        self.overlap = 16  # 重叠区域，避免接缝
-        self.max_vram_gb = 4  # 最大显存限制
-    
-    def detect_optimal_tile(self, h: int, w: int) -> int:
-        """根据分辨率自动选择最佳 tile 大小"""
-        pixels = h * w
-        
-        if pixels <= 1280 * 720:  # 720p
-            return 256
-        elif pixels <= 1920 * 1080:  # 1080p
-            return 128
-        elif pixels <= 3840 * 2160:  # 4K
-            return 64
-        else:
-            return 32
-    
-    def process_frame(self, frame: np.ndarray) -> np.ndarray:
-        """处理单帧，自动分块"""
-        h, w = frame.shape[:2]
-        
-        # 自动检测 tile 大小
-        optimal_tile = self.detect_optimal_tile(h, w)
-        self.upscaler.set_tile_size(optimal_tile)
+        # 读取图片
+        img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise ValueError(f"Failed to load image: {image_path}")
         
         # 超分
-        return self.upscaler.upscale(frame)
+        try:
+            output, _ = self.model.enhance(img, outscale=self.scale)
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                # 显存不足，减小 tile 重试
+                self._reduce_tile_size()
+                output, _ = self.model.enhance(img, outscale=self.scale)
+            else:
+                raise
+        
+        # 保存
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        cv2.imwrite(output_path, output)
+        
+        return output_path
     
-    def process_frame_with_tiling(self, frame: np.ndarray, tile_size: int = None) -> np.ndarray:
+    def upscale_batch(
+        self,
+        input_dir: str,
+        output_dir: str,
+        progress_callback: Optional[Callable[[int, int], None]] = None
+    ) -> Tuple[int, int]:
         """
-        手动分块处理（极端显存不足时）
+        批量超分图片
         
         Args:
-            frame: 输入帧
-            tile_size: 每块大小
-            
+            input_dir: 输入目录
+            output_dir: 输出目录
+            progress_callback: 进度回调 (current, total)
+        
         Returns:
-            处理后的帧
+            (成功数, 总数)
         """
-        if tile_size is None:
-            tile_size = self.tile_size
+        # 获取所有图片
+        image_files = []
+        for ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff"):
+            image_files.extend(Path(input_dir).glob(f"*{ext}"))
         
-        h, w = frame.shape[:2]
-        scale = self.upscaler.scale
+        image_files = sorted(image_files)
+        total = len(image_files)
+        success = 0
         
-        # 输出尺寸
-        out_h, out_w = h * scale, w * scale
-        output = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+        os.makedirs(output_dir, exist_ok=True)
         
-        # 分块处理
-        for y in range(0, h, tile_size - self.overlap):
-            for x in range(0, w, tile_size - self.overlap):
-                # 提取块
-                y1 = min(y, h - tile_size) if y + tile_size > h else y
-                x1 = min(x, w - tile_size) if x + tile_size > w else x
-                y2 = min(y1 + tile_size, h)
-                x2 = min(x1 + tile_size, w)
+        for i, img_path in enumerate(image_files):
+            output_path = os.path.join(output_dir, img_path.name)
+            try:
+                self.upscale_image(str(img_path), output_path)
+                success += 1
+            except Exception as e:
+                logger.error(f"Failed to upscale {img_path}: {e}")
                 
-                tile = frame[y1:y2, x1:x2]
-                
-                # 处理块
-                upscaled_tile = self.upscaler.upscale(tile)
-                
-                # 计算输出位置（考虑 overlap）
-                out_y1 = y1 * scale
-                out_x1 = x1 * scale
-                out_y2 = out_y1 + upscaled_tile.shape[0]
-                out_x2 = out_x1 + upscaled_tile.shape[1]
-                
-                # 粘贴到输出（取中心，避免边界缝）
-                if y > 0 and x > 0:
-                    # 非首行/列，去除重叠
-                    edge = self.overlap * scale // 2
-                    out_y1 += edge
-                    out_x1 += edge
-                    tile_roi = upscaled_tile[edge:, edge:] if upscaled_tile.shape[0] > edge and upscaled_tile.shape[1] > edge else upscaled_tile
-                    output[out_y1:out_y1+tile_roi.shape[0], out_x1:out_x1+tile_roi.shape[1]] = tile_roi
-                else:
-                    output[out_y1:out_y2, out_x1:out_x2] = upscaled_tile
+            # 每10帧清理一次显存，平衡速度和内存
+            if (i + 1) % 10 == 0 and self.device == "cuda":
+                import torch
+                torch.cuda.empty_cache()
+            
+            if progress_callback:
+                progress_callback(i + 1, total)
         
-        return output
+        return success, total
+    
+    def _reduce_tile_size(self):
+        """减小 tile size 以节省显存"""
+        if self.tile_size > 64:
+            self.tile_size = max(64, self.tile_size // 2)
+            self.model.tile = self.tile_size
+            logger.warning(f"Reduced tile size to {self.tile_size} due to OOM")
+    
+    def get_memory_usage(self) -> dict:
+        """获取显存使用情况"""
+        if self.device != "cuda":
+            return {"device": "cpu", "allocated": 0, "cached": 0}
+        
+        import torch
+        return {
+            "device": "cuda",
+            "allocated_mb": torch.cuda.memory_allocated() / 1024 / 1024,
+            "cached_mb": torch.cuda.memory_reserved() / 1024 / 1024,
+            "total_mb": torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
+        }
+    
+    def __del__(self):
+        """清理资源"""
+        if hasattr(self, 'model') and self.model:
+            del self.model
+            gc.collect()
+            if self.device == "cuda":
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                except:
+                    pass
