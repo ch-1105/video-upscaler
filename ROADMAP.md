@@ -106,8 +106,10 @@ P2 (可以有): 锦上添花，后期迭代
 - [x] 项目结构搭建
 - [x] README + 依赖
 - [x] GUI 框架（主窗口、队列、预览位）
-- [ ] FFmpeg 环境检测
-- [ ] 模型下载脚本
-- [ ] 核心处理引擎
+- [x] FFmpeg 环境检测 (core/env_checker.py)
+- [x] 模型下载脚本 (scripts/download_models.py)
+- [x] 核心处理引擎 (core/video_engine.py, core/upscaler.py)
+- [x] 任务队列处理逻辑 (gui/task_queue.py)
+- [x] 进度显示与信号连接
 
-**下一步**：开始 1.1 环境搭建 + 1.3 视频解帧
+**下一步**：测试完整视频处理流程

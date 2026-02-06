@@ -8,8 +8,7 @@ from PyQt6.QtWidgets import (
     QSlider, QPushButton
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQ
-
+from PyQt6.QtGui import QPixmap
 
 class PreviewWidget(QWidget):
     """预览组件"""

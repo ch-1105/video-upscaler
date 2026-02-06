@@ -10,19 +10,6 @@ import hashlib
 from pathlib import Path
 
 
-cd /root/openclaw/workspace/video-upscaler/scripts/download_models.py
-#!/usr/bin/env python3
-"""
-模型下载脚本
-自动下载 Real-ESRGAN 预训练模型
-"""
-import os
-import sys
-import urllib.request
-import hashlib
-from pathlib import Path
-
-
 MODELS = {
     "RealESRGAN_x4plus": {
         "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",

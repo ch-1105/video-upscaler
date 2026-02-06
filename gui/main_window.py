@@ -23,9 +23,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Video Upscaler - 视频高清修复")
         self.setMinimumSize(1000, 700)
-        
+
         self.setup_ui()
         self.setup_styles()
+        self.setup_connections()
     
     def setup_ui(self):
         """设置UI"""
@@ -212,22 +213,71 @@ class MainWindow(QMainWindow):
             self.task_queue.add_task(f)
         self.drop_label.setText(f"已添加 {self.task_queue.count()} 个视频\n点击添加更多")
     
+    def setup_connections(self):
+        """连接信号"""
+        # 队列信号
+        self.task_queue.task_started.connect(self.on_task_started)
+        self.task_queue.task_finished.connect(self.on_task_finished)
+        self.task_queue.all_finished.connect(self.on_all_finished)
+        self.task_queue.progress_updated.connect(self.on_progress_updated)
+
+        # 预设改变
+        self.preset_combo.currentIndexChanged.connect(self.on_preset_changed)
+
+        # 补帧选项改变
+        self.interpolate_check.stateChanged.connect(self.on_interpolate_changed)
+
+    def on_preset_changed(self, index: int):
+        """预设改变"""
+        presets = ["流畅", "标准", "高清"]
+        if 0 <= index < len(presets):
+            self.task_queue.set_preset(presets[index])
+
+    def on_interpolate_changed(self, state: int):
+        """补帧选项改变"""
+        self.task_queue.set_interpolate(bool(state))
+
+    def on_task_started(self, file_path: str):
+        """任务开始"""
+        self.preview.set_video(total_frames=100)  # 预估
+
+    def on_task_finished(self, file_path: str, success: bool):
+        """任务完成"""
+        pass
+
+    def on_all_finished(self):
+        """所有任务完成"""
+        self.btn_start.setEnabled(True)
+        self.btn_pause.setEnabled(False)
+        self.total_progress.setValue(100)
+        QMessageBox.information(self, "完成", "所有视频处理完成！")
+
+    def on_progress_updated(self, current: int, total: int):
+        """总进度更新"""
+        self.total_progress.setValue(int(current / total * 100))
+
     def on_select_output(self):
         """选择输出目录"""
         path = QFileDialog.getExistingDirectory(self, "选择输出目录")
         if path:
             self.output_path.setText(path)
-    
+            self.task_queue.set_output_dir(path)
+
     def on_start(self):
         """开始处理"""
         if self.task_queue.count() == 0:
             QMessageBox.warning(self, "提示", "请先添加视频文件")
             return
-        
+
+        # 更新设置
+        self.on_preset_changed(self.preset_combo.currentIndex())
+        self.on_interpolate_changed(self.interpolate_check.checkState().value)
+
         self.btn_start.setEnabled(False)
         self.btn_pause.setEnabled(True)
+        self.total_progress.setValue(0)
         self.task_queue.start_processing()
-    
+
     def on_pause(self):
         """暂停"""
         self.task_queue.pause_processing()
