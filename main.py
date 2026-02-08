@@ -13,16 +13,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.env_checker import check_environment
 from gui.main_window import MainWindow
+from gui.model_downloader import ModelDownloaderDialog
 
 
 def check_environment_gui():
     """检查环境并在 GUI 中显示结果"""
     checker = check_environment()
-    
+
     # 检查必要依赖
     has_ffmpeg = checker.ffmpeg_path is not None
     has_pytorch = checker.check_pytorch()
-    
+
     if not has_ffmpeg:
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Icon.Critical)
@@ -34,7 +35,7 @@ def check_environment_gui():
         )
         msg.exec()
         return False
-    
+
     if not has_pytorch:
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Icon.Critical)
@@ -45,39 +46,21 @@ def check_environment_gui():
         )
         msg.exec()
         return False
-    
-    # 检查模型
+
+    # 检查模型 - 使用GUI下载对话框
     model_status = checker.check_models()
     missing_models = [name for name, exists in model_status.items() if not exists]
-    
+
     if missing_models:
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setWindowTitle("模型文件缺失")
-        msg.setText(f"缺少 {len(missing_models)} 个模型文件")
-        msg.setInformativeText(
-            f"缺失: {', '.join(missing_models)}\n\n"
-            "是否现在下载？"
-        )
-        msg.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        
-        if msg.exec() == QMessageBox.StandardButton.Yes:
-            # 运行模型下载脚本
-            import subprocess
-            result = subprocess.run(
-                [sys.executable, "scripts/download_models.py"],
-                capture_output=True,
-                text=True
+        # 使用新的GUI下载对话框
+        if not ModelDownloaderDialog.check_and_download(silent=False):
+            QMessageBox.critical(
+                None, "模型下载失败",
+                "模型下载失败或用户取消。\n"
+                "请手动运行: python scripts/download_models.py"
             )
-            if result.returncode != 0:
-                QMessageBox.critical(
-                    None, "下载失败",
-                    f"模型下载失败:\n{result.stderr}"
-                )
-                return False
-    
+            return False
+
     return True
 
 

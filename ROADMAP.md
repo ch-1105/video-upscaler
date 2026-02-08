@@ -111,5 +111,9 @@ P2 (可以有): 锦上添花，后期迭代
 - [x] 核心处理引擎 (core/video_engine.py, core/upscaler.py)
 - [x] 任务队列处理逻辑 (gui/task_queue.py)
 - [x] 进度显示与信号连接
+- [x] GUI 模型下载对话框 (gui/model_downloader.py)
+- [x] PyInstaller 打包脚本 (installer/build.py)
+- [x] Inno Setup 安装脚本 (installer/setup.iss)
 
-**下一步**：测试完整视频处理流程
+**当前阶段**: 阶段四 - 优化与打包 (进行中)
+**下一步**: 性能优化 + 错误处理健壮性
